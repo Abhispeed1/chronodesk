@@ -1,0 +1,744 @@
+import { create } from 'zustand';
+
+import toast from 'react-hot-toast';
+
+import axiosInstance from '../../../lib/axios';
+
+import { useAuthStore } from '../../auth/store';
+
+import { socket } from '../../../services/socket';
+
+/* ================= TYPES ================= */
+
+interface User {
+  _id: string;
+  name: string;
+  email?: string;
+  avatar?: string;
+  isOnline?: boolean;
+}
+
+export interface LastMessageType {
+  content: string;
+
+  createdAt: string;
+
+  senderId: string;
+
+  readAt: string | null;
+
+  deliveredAt: string | null;
+}
+
+export interface Chat {
+  _id: string;
+
+  participants: User[];
+
+  lastMessage: LastMessageType | null;
+
+  updatedAt: string;
+
+  unreadCount: number;
+
+  isOnline?: boolean;
+}
+
+export interface Message {
+  _id: string;
+
+  chatId: string;
+
+  content: string;
+
+  senderId: string;
+
+  createdAt: string;
+
+  deliveredAt: string | null;
+
+  readAt: string | null;
+}
+
+/* ================= ACK ================= */
+
+type AckResponse<T> =
+  | {
+      success: false;
+
+      error: string;
+    }
+  | {
+      success: true;
+
+      message: T;
+    };
+
+/* ================= STORE ================= */
+
+interface ChatStore {
+  chats: Chat[];
+
+  messages: Record<
+    string,
+    Message[]
+  >;
+
+  currentChat: Chat | null;
+
+  isLoading: boolean;
+
+  socketInitialized: boolean;
+
+  setCurrentChat: (
+    chat: Chat | null
+  ) => void;
+
+  fetchChats: () => Promise<void>;
+
+  fetchMessages: (
+    chatId: string
+  ) => Promise<void>;
+
+  sendMessage: (
+    chatId: string,
+    content: string
+  ) => void;
+
+  markAsRead: (
+    chatId: string,
+    otherUserId: string
+  ) => void;
+
+  deleteChat: (
+    chatId: string
+  ) => Promise<void>;
+
+  initSocket: () => void;
+
+  cleanupSocket: () => void;
+
+  reset: () => void;
+}
+
+/* ================= STORE ================= */
+
+export const useChatStore =
+  create<ChatStore>(
+    (set, get) => ({
+      chats: [],
+
+      messages: {},
+
+      currentChat: null,
+
+      isLoading: false,
+
+      socketInitialized: false,
+
+      /* ================= CURRENT CHAT ================= */
+
+      setCurrentChat: (
+        chat
+      ) => {
+        set({
+          currentChat: chat,
+        });
+        if (chat) {
+          get().markAsRead(chat._id, '');
+        }
+      },
+
+      /* ================= FETCH CHATS ================= */
+
+      fetchChats: async () => {
+        set({
+          isLoading: true,
+        });
+
+        try {
+          const { data } =
+            await axiosInstance.get(
+              '/chats'
+            );
+
+          if (!data.success) {
+            throw new Error(
+              data.error
+            );
+          }
+
+          const chats =
+            data.chats.sort(
+              (
+                a: Chat,
+                b: Chat
+              ) =>
+                +new Date(
+                  b.updatedAt
+                ) -
+                +new Date(
+                  a.updatedAt
+                )
+            );
+
+          set({ chats });
+        } catch (error) {
+          console.error(error);
+
+          toast.error(
+            'Failed to load chats'
+          );
+        } finally {
+          set({
+            isLoading: false,
+          });
+        }
+      },
+
+      /* ================= FETCH MESSAGES ================= */
+
+      fetchMessages:
+        async (chatId) => {
+          set({
+            isLoading: true,
+          });
+
+          try {
+            const { data } =
+              await axiosInstance.get(
+                `/chats/${chatId}/messages`
+              );
+
+            if (
+              !data.success
+            ) {
+              throw new Error(
+                data.error
+              );
+            }
+
+            const sorted =
+              [
+                ...data.messages,
+              ].sort(
+                (
+                  a: Message,
+                  b: Message
+                ) =>
+                  +new Date(
+                    a.createdAt
+                  ) -
+                  +new Date(
+                    b.createdAt
+                  )
+              );
+
+            set((state) => ({
+              messages: {
+                ...state.messages,
+
+                [chatId]:
+                  sorted,
+              },
+            }));
+
+            get().markAsRead(chatId, '');
+          } catch (error) {
+            console.error(error);
+
+            toast.error(
+              'Failed to load messages'
+            );
+          } finally {
+            set({
+              isLoading: false,
+            });
+          }
+        },
+
+      /* ================= SEND MESSAGE ================= */
+
+      sendMessage: (
+        chatId,
+        content
+      ) => {
+        if (
+          !socket.connected
+        ) {
+          toast.error(
+            'Socket disconnected'
+          );
+
+          return;
+        }
+
+        const user =
+          useAuthStore.getState()
+            .user;
+
+        if (!user?.id && !user?._id) {
+          toast.error(
+            'User not authenticated'
+          );
+
+          return;
+        }
+
+        const trimmed =
+          content.trim();
+
+        if (!trimmed)
+          return;
+
+        const tempId = `temp-${Date.now()}`;
+
+        const optimisticMessage: Message =
+          {
+            _id: tempId,
+
+            chatId,
+
+            content:
+              trimmed,
+
+            senderId:
+              user.id || user._id || '',
+
+            createdAt:
+              new Date().toISOString(),
+
+            deliveredAt:
+              null,
+
+            readAt: null,
+          };
+
+        /* OPTIMISTIC UPDATE */
+
+        set((state) => ({
+          messages: {
+            ...state.messages,
+
+            [chatId]: [
+              ...(state
+                .messages[
+                chatId
+              ] || []),
+
+              optimisticMessage,
+            ],
+          },
+        }));
+
+        /* SOCKET EMIT */
+
+        socket.emit(
+          'message:send',
+
+          {
+            chatId,
+
+            senderId:
+              user.id || user._id || '',
+
+            content:
+              trimmed,
+          },
+
+          (
+            response: AckResponse<Message>
+          ) => {
+          if (!response.success) {
+  toast.error(
+    'error' in response
+      ? response.error
+      : 'Failed to send message'
+  );
+
+  return;
+}
+
+            const serverMessage =
+              response.message;
+
+            set(
+              (state) => {
+                const chatMessages = state.messages[chatId] || [];
+                const updatedMessages = chatMessages.map((m) =>
+                  m._id === tempId ? serverMessage : m
+                );
+
+                const updatedChats = state.chats.map((chat) => {
+                  if (chat._id === chatId) {
+                    return {
+                      ...chat,
+                      lastMessage: {
+                        content: serverMessage.content,
+                        senderId: serverMessage.senderId,
+                        createdAt: serverMessage.createdAt,
+                        readAt: serverMessage.readAt,
+                        deliveredAt: serverMessage.deliveredAt,
+                      },
+                    };
+                  }
+                  return chat;
+                });
+
+                const sortedChats = [...updatedChats].sort(
+                  (a, b) =>
+                    +new Date(b.lastMessage?.createdAt || b.updatedAt) -
+                    +new Date(a.lastMessage?.createdAt || a.updatedAt)
+                );
+
+                return {
+                  messages: {
+                    ...state.messages,
+                    [chatId]: updatedMessages,
+                  },
+                  chats: sortedChats,
+                  currentChat: state.currentChat?._id === chatId
+                    ? {
+                        ...state.currentChat,
+                        lastMessage: {
+                          content: serverMessage.content,
+                          senderId: serverMessage.senderId,
+                          createdAt: serverMessage.createdAt,
+                          readAt: serverMessage.readAt,
+                          deliveredAt: serverMessage.deliveredAt,
+                        },
+                      }
+                    : state.currentChat,
+                };
+              }
+            );
+          }
+        );
+      },
+
+      /* ================= MARK READ ================= */
+
+      markAsRead: (
+        chatId,
+        otherUserId
+      ) => {
+        socket.emit(
+          'chat:read',
+          {
+            chatId,
+
+            otherUserId,
+          }
+        );
+
+        set((state) => ({
+          chats:
+            state.chats.map(
+              (chat) =>
+                chat._id ===
+                chatId
+                  ? {
+                      ...chat,
+
+                      unreadCount: 0,
+                    }
+                  : chat
+            ),
+        }));
+      },
+
+      /* ================= DELETE CHAT ================= */
+
+      deleteChat:
+        async (chatId) => {
+          try {
+            const { data } =
+              await axiosInstance.delete(
+                `/chats/${chatId}`
+              );
+
+            if (
+              !data.success
+            ) {
+              throw new Error(
+                data.error
+              );
+            }
+
+            set((state) => ({
+              chats:
+                state.chats.filter(
+                  (
+                    chat
+                  ) =>
+                    chat._id !==
+                    chatId
+                ),
+
+              messages:
+                {
+                  ...state.messages,
+
+                  [chatId]:
+                    [],
+                },
+
+              currentChat:
+                state
+                  .currentChat
+                  ?._id ===
+                chatId
+                  ? null
+                  : state.currentChat,
+            }));
+
+            toast.success(
+              'Chat deleted'
+            );
+          } catch (error) {
+            console.error(error);
+
+            toast.error(
+              'Failed to delete chat'
+            );
+          }
+        },
+
+      /* ================= SOCKET INIT ================= */
+
+      initSocket: () => {
+        if (get().socketInitialized && socket.connected) {
+          return;
+        }
+
+        get().cleanupSocket();
+
+        const token = useAuthStore.getState().token;
+        if (token) {
+          socket.auth = { token };
+        }
+        
+        if (!socket.connected) {
+          socket.connect();
+        }
+
+        // Fetch chats list immediately on startup to load unread counts for the sidebar badge
+        get().fetchChats();
+
+        socket.on(
+          'message:received',
+
+          (
+            message: Message
+          ) => {
+            // If we are actively viewing this chat, mark it as read immediately
+            const isCurrentActive = get().currentChat?._id === message.chatId;
+            if (isCurrentActive) {
+              socket.emit('chat:read', { chatId: message.chatId });
+            }
+
+            // If this chat is new and doesn't exist in our sidebar, fetch chats to load it
+            const chatExists = get().chats.some((c) => c._id === message.chatId);
+            if (!chatExists) {
+              setTimeout(() => {
+                get().fetchChats();
+              }, 0);
+            }
+
+            set(
+              (state) => {
+                const chatMessages = state.messages[message.chatId] || [];
+                const updatedMessages = [...chatMessages, message];
+
+                const updatedChats = state.chats.map((chat) => {
+                  if (chat._id === message.chatId) {
+                    const isCurrent = state.currentChat?._id === message.chatId;
+                    const currentUserId = useAuthStore.getState().user?.id || useAuthStore.getState().user?._id;
+                    const isFromMe = !!(currentUserId && message.senderId.toString() === currentUserId.toString());
+                    return {
+                      ...chat,
+                      lastMessage: {
+                        content: message.content,
+                        senderId: message.senderId,
+                        createdAt: message.createdAt,
+                        readAt: isCurrent ? new Date().toISOString() : message.readAt,
+                        deliveredAt: message.deliveredAt,
+                      },
+                      unreadCount: (isCurrent || isFromMe) ? 0 : (chat.unreadCount || 0) + 1,
+                    };
+                  }
+                  return chat;
+                });
+
+                const sortedChats = [...updatedChats].sort(
+                  (a, b) =>
+                    +new Date(b.lastMessage?.createdAt || b.updatedAt) -
+                    +new Date(a.lastMessage?.createdAt || a.updatedAt)
+                );
+
+                return {
+                  messages: {
+                    ...state.messages,
+                    [message.chatId]: updatedMessages,
+                  },
+                  chats: sortedChats,
+                  currentChat: state.currentChat?._id === message.chatId
+                    ? {
+                        ...state.currentChat,
+                        lastMessage: {
+                          content: message.content,
+                          senderId: message.senderId,
+                          createdAt: message.createdAt,
+                          readAt: isCurrentActive ? new Date().toISOString() : message.readAt,
+                          deliveredAt: message.deliveredAt,
+                        },
+                      }
+                    : state.currentChat,
+                };
+              }
+            );
+          }
+        );
+
+        socket.on('chat:read', ({ chatId, readAt }: { chatId: string; readAt: string }) => {
+          set((state) => {
+            const chatMessages = state.messages[chatId] || [];
+            const currentUserId = useAuthStore.getState().user?.id || useAuthStore.getState().user?._id;
+            const updatedMessages = chatMessages.map((msg) => {
+              if (currentUserId && msg.senderId.toString() === currentUserId.toString() && !msg.readAt) {
+                return { ...msg, readAt };
+              }
+              return msg;
+            });
+
+            const updatedChats = state.chats.map((chat) => {
+              if (chat._id === chatId) {
+                return {
+                  ...chat,
+                  lastMessage: chat.lastMessage
+                    ? {
+                        ...chat.lastMessage,
+                        readAt: chat.lastMessage.senderId.toString() === currentUserId?.toString() ? readAt : chat.lastMessage.readAt,
+                      }
+                    : chat.lastMessage,
+                };
+              }
+              return chat;
+            });
+
+            const isCurrent = state.currentChat?._id === chatId;
+            return {
+              messages: {
+                ...state.messages,
+                [chatId]: updatedMessages,
+              },
+              chats: updatedChats,
+              currentChat: isCurrent && state.currentChat
+                ? {
+                    ...state.currentChat,
+                    lastMessage: state.currentChat.lastMessage
+                      ? {
+                          ...state.currentChat.lastMessage,
+                          readAt: state.currentChat.lastMessage.senderId.toString() === currentUserId?.toString() ? readAt : state.currentChat.lastMessage.readAt,
+                        }
+                      : state.currentChat.lastMessage,
+                  }
+                : state.currentChat,
+            };
+          });
+        });
+
+        socket.on('user:online', ({ userId }: { userId: string }) => {
+          set((state) => ({
+            chats: state.chats.map(chat => ({
+              ...chat,
+              participants: chat.participants.map(p => 
+                p._id === userId ? { ...p, isOnline: true } : p
+              )
+            })),
+            currentChat: state.currentChat ? {
+              ...state.currentChat,
+              participants: state.currentChat.participants.map(p => 
+                p._id === userId ? { ...p, isOnline: true } : p
+              )
+            } : null
+          }));
+        });
+        
+        socket.on('user:offline', ({ userId }: { userId: string }) => {
+          set((state) => ({
+            chats: state.chats.map(chat => ({
+              ...chat,
+              participants: chat.participants.map(p => 
+                p._id === userId ? { ...p, isOnline: false } : p
+              )
+            })),
+            currentChat: state.currentChat ? {
+              ...state.currentChat,
+              participants: state.currentChat.participants.map(p => 
+                p._id === userId ? { ...p, isOnline: false } : p
+              )
+            } : null
+          }));
+        });
+
+        set({
+          socketInitialized: true,
+        });
+      },
+
+      /* ================= SOCKET CLEANUP ================= */
+
+      cleanupSocket: () => {
+        socket.off(
+          'message:received'
+        );
+
+        socket.off(
+          'message:delivered'
+        );
+
+        socket.off(
+          'chat:messageRead'
+        );
+
+        socket.off(
+          'chat:read'
+        );
+
+        socket.off(
+          'user:online'
+        );
+
+        socket.off(
+          'user:offline'
+        );
+
+        if (socket.connected) {
+          socket.disconnect();
+        }
+
+        set({
+          socketInitialized: false,
+        });
+      },
+
+      /* ================= RESET ================= */
+
+      reset: () => {
+        get().cleanupSocket();
+
+        set({
+          chats: [],
+
+          messages: {},
+
+          currentChat: null,
+
+          isLoading: false,
+
+          socketInitialized: false,
+        });
+      },
+    })
+  );

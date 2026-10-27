@@ -1,0 +1,95 @@
+import { Server, Socket } from 'socket.io';
+import Chat from '../models/Chat';
+import Message from '../models/Message';
+import { encryptMessage, decryptMessage } from '../utils/crypto';
+
+export default function setupChatSocket(io: Server, socket: Socket) {
+  socket.on('message:send', async (data, callback) => {
+    try {
+      const { chatId, senderId, content } = data;
+      
+      const chat = await Chat.findById(chatId);
+      if (!chat) {
+        if (callback) callback({ success: false, error: 'Chat not found' });
+        return;
+      }
+      
+      const encryptedContent = encryptMessage(content);
+
+      const message = await Message.create({
+        chatId,
+        senderId,
+        content: encryptedContent,
+      });
+      
+      chat.lastMessage = {
+        content: encryptedContent,
+        senderId,
+        createdAt: message.createdAt,
+        readAt: null,
+        deliveredAt: null,
+      } as any;
+      
+      const otherParticipants = chat.participants.filter((p: any) => p.toString() !== senderId);
+      for (const p of otherParticipants) {
+        const idStr = p.toString();
+        const currentCount = chat.unreadCounts?.get(idStr) || 0;
+        chat.unreadCounts?.set(idStr, currentCount + 1);
+      }
+      
+      await chat.save();
+      
+      const decryptedMessagePayload = {
+        ...message.toObject(),
+        content: content,
+      };
+
+      for (const p of otherParticipants) {
+        io.to(p.toString()).emit('message:received', decryptedMessagePayload);
+      }
+      
+      if (callback) callback({ success: true, message: decryptedMessagePayload });
+    } catch (error) {
+      console.error('Socket message:send error:', error);
+      if (callback) callback({ success: false, error: 'Failed to send message' });
+    }
+  });
+
+  socket.on('chat:read', async (data) => {
+    try {
+      const { chatId } = data;
+      const userId = socket.data.userId;
+      
+      const chat = await Chat.findById(chatId);
+      if (!chat) return;
+
+      // 1. Reset unread count for this user
+      if (chat.unreadCounts?.has(userId)) {
+        chat.unreadCounts.set(userId, 0);
+      }
+
+      // 2. Mark all messages from other users in this chat as read in the database
+      const readAt = new Date();
+      await Message.updateMany(
+        { chatId, senderId: { $ne: userId }, readAt: null },
+        { $set: { readAt } }
+      );
+
+      // 3. Update the last message read status if it was sent by someone else
+      if (chat.lastMessage && chat.lastMessage.senderId && chat.lastMessage.senderId.toString() !== userId) {
+        chat.lastMessage.readAt = readAt;
+      }
+
+      await chat.save();
+
+      // 4. Notify other participants that this chat's messages have been read
+      const otherParticipants = chat.participants.filter((p: any) => p.toString() !== userId);
+      for (const p of otherParticipants) {
+        io.to(p.toString()).emit('chat:read', { chatId, readAt, readerId: userId });
+      }
+      
+    } catch (error) {
+      console.error('Socket chat:read error:', error);
+    }
+  });
+}

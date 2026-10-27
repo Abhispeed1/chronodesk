@@ -1,0 +1,115 @@
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { api } from '../../lib/axios';
+import { motion } from 'framer-motion';
+import { Loader2, ArrowLeft } from 'lucide-react';
+
+export default function ForgotPasswordPage() {
+  const [email, setEmail] = useState('');
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError('');
+    setSuccess('');
+
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    const allowedDomains = [
+      'gmail.com',
+      'yahoo.com',
+      'outlook.com',
+      'hotmail.com',
+      'icloud.com',
+      'protonmail.com',
+      'proton.me',
+      'aol.com',
+      'zoho.com',
+      'gmx.com',
+      'yandex.com',
+      'mail.com',
+      'example.com'
+    ];
+    const trimmedEmail = email.trim();
+    const emailParts = trimmedEmail.split('@');
+    if (!emailRegex.test(trimmedEmail) || emailParts.length !== 2 || !allowedDomains.includes(emailParts[1].toLowerCase())) {
+      setError('Please enter a valid email address with an allowed domain (e.g., user@gmail.com).');
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      await api.post('/auth/forgot-password', { email: email.trim() });
+      setSuccess('A password reset link has been sent to your email address. Please check your inbox.');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to request password reset');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 20 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.5 }}
+      className="space-y-8"
+    >
+      <div className="space-y-2 text-center lg:text-left">
+        <div className="flex items-center gap-2 mb-2 justify-center lg:justify-start">
+          <Link to="/login" className="text-muted-foreground hover:text-foreground">
+            <ArrowLeft size={18} />
+          </Link>
+          <span className="text-sm text-muted-foreground">Back to Sign In</span>
+        </div>
+        <h2 className="text-3xl font-bold tracking-tight">Forgot Password</h2>
+        <p className="text-muted-foreground text-sm">
+          Enter your email and we'll generate a secure password reset link.
+        </p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {error && (
+          <div className="p-3 text-sm text-destructive bg-destructive/10 rounded-xl border border-destructive/20">
+            {error}
+          </div>
+        )}
+
+        {success && (
+          <div className="p-3 text-sm text-emerald-500 bg-emerald-500/10 rounded-xl border border-emerald-500/20">
+            {success}
+          </div>
+        )}
+
+        {!success && (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium leading-none" htmlFor="email">
+                Email Address
+              </label>
+              <input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 focus:border-purple-500"
+                placeholder="name@example.com"
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-11 w-full"
+            >
+              {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : 'Send Reset Link'}
+            </button>
+          </div>
+        )}
+      </form>
+    </motion.div>
+  );
+}
